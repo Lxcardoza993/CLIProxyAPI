@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/tidwall/gjson"
 )
 
@@ -55,6 +56,25 @@ func TestVideosModelValidationAllowsXAIVideoModel(t *testing.T) {
 	}
 	if isSupportedVideosModel("codex/grok-imagine-video-1.5-preview") {
 		t.Fatal("expected codex/grok-imagine-video-1.5-preview to be rejected")
+	}
+}
+
+func TestVideosModelValidationAllowsOpenAICompatVideoModel(t *testing.T) {
+	model := "test-openai-compat-video-model"
+	clientID := "test-openai-compat-video-client"
+	registry.GetGlobalRegistry().RegisterClient(clientID, "test-openai-compat", []*registry.ModelInfo{{
+		ID:      model,
+		Object:  "model",
+		Type:    registry.OpenAIVideoModelType,
+		OwnedBy: "test",
+	}})
+	defer registry.GetGlobalRegistry().UnregisterClient(clientID)
+
+	if !isOpenAICompatVideosModel(model) {
+		t.Fatalf("expected %s to be recognized as an OpenAI-compatible video model", model)
+	}
+	if !isSupportedVideosModel(model) {
+		t.Fatalf("expected %s to be supported", model)
 	}
 }
 

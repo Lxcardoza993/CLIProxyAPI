@@ -1681,6 +1681,8 @@ func TestExecutorAdapterMethods(t *testing.T) {
 		pluginID: "executor-plugin",
 		provider: "plugin-provider",
 		executor: exec,
+		inputFormats:  []sdktranslator.Format{sdktranslator.FormatOpenAI},
+		outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAI},
 	}
 	auth := &coreauth.Auth{
 		ID:       "auth-1",
@@ -1862,6 +1864,8 @@ func TestExecutorAdapterPanicFusesAndReturnsError(t *testing.T) {
 				return pluginapi.ExecutorResponse{Payload: []byte("should-not-run")}, nil
 			},
 		},
+		inputFormats:  []sdktranslator.Format{sdktranslator.FormatOpenAI},
+		outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAI},
 	}
 
 	resp, errExecute := adapter.Execute(context.Background(), &coreauth.Auth{}, coreexecutor.Request{}, coreexecutor.Options{})

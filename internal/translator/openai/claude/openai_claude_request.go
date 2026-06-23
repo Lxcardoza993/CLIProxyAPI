@@ -336,7 +336,12 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 func shouldMapClaudeThinkingToGPTReasoning(part gjson.Result) bool {
 	signature := part.Get("signature")
 	if !signature.Exists() || strings.TrimSpace(signature.String()) == "" {
-		return false
+		// Unsigned thinking blocks (e.g., CPA-generated from DeepSeek
+		// reasoning_content responses) are legitimate — map them to
+		// reasoning_content so DeepSeek receives the thinking history
+		// it requires on subsequent turns.
+		// The caller already guards against non-assistant roles.
+		return true
 	}
 	_, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, signature.String())
 	return ok

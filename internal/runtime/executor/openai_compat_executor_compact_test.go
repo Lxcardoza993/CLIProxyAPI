@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -59,6 +60,108 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	}
 	if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
 		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+}
+
+func TestOpenAICompatExecutorVideoPassthrough(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	var gotContentType string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotContentType = r.Header.Get("Content-Type")
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"video_1","object":"video","status":"queued"}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "upstream-video",
+		Payload: []byte(`{"model":"client-video","prompt":"make a video","duration":6,"aspect_ratio":"16:9","resolution":"720p","preset":"normal","stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-video"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != "/v1/videos" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/videos")
+	}
+	if gotContentType != "application/x-www-form-urlencoded" {
+		t.Fatalf("content type = %q, want application/x-www-form-urlencoded", gotContentType)
+	}
+	values, errParse := url.ParseQuery(string(gotBody))
+	if errParse != nil {
+		t.Fatalf("parse video form body: %v", errParse)
+	}
+	if got := values.Get("model"); got != "upstream-video" {
+		t.Fatalf("model = %q, want upstream-video", got)
+	}
+	if got := values.Get("prompt"); got != "make a video" {
+		t.Fatalf("prompt = %q, want make a video", got)
+	}
+	if got := values.Get("seconds"); got != "6" {
+		t.Fatalf("seconds = %q, want 6", got)
+	}
+	if got := values.Get("size"); got != "1280x720" {
+		t.Fatalf("size = %q, want 1280x720", got)
+	}
+	if got := values.Get("resolution_name"); got != "720p" {
+		t.Fatalf("resolution_name = %q, want 720p", got)
+	}
+	if got := values.Get("preset"); got != "normal" {
+		t.Fatalf("preset = %q, want normal", got)
+	}
+	if values.Get("stream") != "" {
+		t.Fatalf("unexpected stream in video body: %s", string(gotBody))
+	}
+	if string(resp.Payload) != `{"id":"video_1","object":"video","status":"queued"}` {
+		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+}
+
+func TestOpenAICompatExecutorVideoRetrieve(t *testing.T) {
+	var gotPath string
+	var gotMethod string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"video_1","object":"video","status":"completed","progress":100,"video":{"url":"https://example.invalid/video.mp4"}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "upstream-video",
+		Payload: []byte(`{"request_id":"video_1"}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-video"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotMethod != http.MethodGet {
+		t.Fatalf("method = %q, want GET", gotMethod)
+	}
+	if gotPath != "/v1/videos/video_1" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/videos/video_1")
+	}
+	if got := gjson.GetBytes(resp.Payload, "status").String(); got != "completed" {
+		t.Fatalf("status = %q, want completed", got)
 	}
 }
 

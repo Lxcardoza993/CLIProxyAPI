@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -54,8 +55,17 @@ func isXAIVideosModel(model string) bool {
 	return prefix == "" || prefix == "xai" || prefix == "x-ai" || prefix == "grok"
 }
 
+func isOpenAICompatVideosModel(model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	info := registry.LookupModelInfo(model)
+	return info != nil && info.Type == registry.OpenAIVideoModelType
+}
+
 func isSupportedVideosModel(model string) bool {
-	return isXAIVideosModel(model)
+	return isXAIVideosModel(model) || isOpenAICompatVideosModel(model)
 }
 
 func rejectUnsupportedVideosModel(c *gin.Context, model string) bool {
@@ -437,6 +447,10 @@ func (h *OpenAIAPIHandler) VideosCreate(c *gin.Context) {
 	if rejectUnsupportedVideosModel(c, videoModel) {
 		return
 	}
+	if isOpenAICompatVideosModel(videoModel) {
+		h.collectOpenAICompatVideosCreate(c, rawJSON, videoModel)
+		return
+	}
 
 	xaiReq, meta, err := buildXAIVideosCreateRequest(rawJSON, videoModel)
 	if err != nil {
@@ -551,6 +565,28 @@ func (h *OpenAIAPIHandler) VideosRetrieve(c *gin.Context) {
 }
 
 func (h *OpenAIAPIHandler) collectXAIVideosNative(c *gin.Context, rawJSON []byte, model string) {
+	c.Header("Content-Type", "application/json")
+
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, model, rawJSON, "")
+	stopKeepAlive()
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		if errMsg.Error != nil {
+			cliCancel(errMsg.Error)
+		} else {
+			cliCancel(nil)
+		}
+		return
+	}
+
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	_, _ = c.Writer.Write(resp)
+	cliCancel(nil)
+}
+
+func (h *OpenAIAPIHandler) collectOpenAICompatVideosCreate(c *gin.Context, rawJSON []byte, model string) {
 	c.Header("Content-Type", "application/json")
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())

@@ -53,3 +53,12 @@ _bmad-output/*
 .DS_Store
 ._*
 .gocache/
+
+# 本地编译产物 (误生成的二进制, 不入库)
+/CLIProxyAPI
+/cli-proxy-api
+*.exe
+
+# 运行日志
+proxy.log
+*.log

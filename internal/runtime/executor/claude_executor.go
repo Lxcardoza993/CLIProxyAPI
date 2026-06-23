@@ -46,9 +46,28 @@ type ClaudeExecutor struct {
 const claudeToolPrefix = ""
 
 func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body []byte, baseModel string) []byte {
-	sanitized, report := sigcompat.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel)
+	// DeepSeek models require reasoning_content from prior assistant turns
+	// to be echoed back on every multi-turn request.  Dropping empty
+	// thinking placeholders before the translator layer runs removes the
+	// blocks the translator would convert to reasoning_content, producing
+	// a 400 from the upstream model.
+	dropEmptyThinking := !requiresReasoningContentEcho(baseModel)
+	sanitized, report := sigcompat.SanitizeClaudeMessagesSignaturesForTarget(body, sigcompat.ClaudeMessagesSignatureSanitizeOptions{
+		TargetProvider:                sigcompat.SignatureProviderClaude,
+		TargetModel:                   baseModel,
+		DropEmptyMessages:             true,
+		DropToolSignatures:            true,
+		DropEmptyThinkingPlaceholders: dropEmptyThinking,
+	})
 	logClaudeSignatureSanitizeReport(ctx, baseModel, report)
 	return sanitized
+}
+
+// requiresReasoningContentEcho returns true for models whose API contract
+// demands that reasoning/thinking blocks from prior turns be passed back
+// in the messages a
+func requiresReasoningContentEcho(model string) bool {
+	return strings.HasPrefix(strings.ToLower(model), "deepseek")
 }
 
 func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, report sigcompat.SignatureSanitizeReport) {
@@ -1685,9 +1704,18 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 		messageText = system.String()
 	}
 
-	// Skip if already injected
+	// Skip if already injected, but normalize cch to a stable value first.
+	// Claude Code injects a per-session cch that changes periodically; every
+	// change invalidates the entire prompt cache prefix because the billing
+	// header sits at system[0] (the front of the rendered prompt).  Replacing
+	// the varying cch with "00000" keeps the cache prefix byte-stable across
+	// requests that are otherwise identical.
 	firstText := gjson.GetBytes(payload, "system.0.text").String()
 	if strings.HasPrefix(firstText, "x-anthropic-billing-header:") {
+		if claudeBillingHeaderCCHPattern.MatchString(firstText) {
+			fixedText := claudeBillingHeaderCCHPattern.ReplaceAllString(firstText, "cch=00000;")
+			payload, _ = sjson.SetBytes(payload, "system.0.text", fixedText)
+		}
 		return payload
 	}
 

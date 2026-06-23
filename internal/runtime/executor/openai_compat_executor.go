@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"strings"
 	"time"
 
@@ -27,9 +28,11 @@ import (
 
 const (
 	openAICompatImageHandlerType            = "openai-image"
+	openAICompatVideoHandlerType            = "openai-video"
 	openAICompatImagesGenerationsPath       = "/images/generations"
 	openAICompatImagesEditsPath             = "/images/edits"
 	openAICompatDefaultImageEndpoint        = openAICompatImagesGenerationsPath
+	openAICompatVideosPath                  = "/videos"
 	openAICompatMultipartMemory       int64 = 32 << 20
 )
 
@@ -85,6 +88,9 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImages(ctx, auth, req, opts, endpointPath)
+	}
+	if endpointPath := openAICompatVideoEndpointPath(opts); endpointPath != "" {
+		return e.executeVideos(ctx, auth, req, opts, endpointPath)
 	}
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -220,6 +226,39 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 	}
 	reporter.SetTranslatedReasoningEffort(payload, "openai")
 
+	return e.executeMedia(ctx, auth, reporter, baseURL, apiKey, payload, contentType, endpointPath)
+}
+
+func (e *OpenAICompatExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (resp cliproxyexecutor.Response, err error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	baseURL, apiKey := e.resolveCredentials(auth)
+	if baseURL == "" {
+		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
+		return resp, err
+	}
+
+	if videoID, ok := openAICompatVideoRetrieveID(req.Payload); ok {
+		return e.executeVideoRetrieve(ctx, auth, reporter, baseURL, apiKey, videoID, endpointPath)
+	}
+
+	payload, contentType, errPrepare := prepareOpenAICompatVideosPayload(req.Payload, baseModel, opts.Headers.Get("Content-Type"))
+	if errPrepare != nil {
+		err = errPrepare
+		return resp, err
+	}
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	reporter.SetTranslatedReasoningEffort(payload, "openai")
+
+	return e.executeMedia(ctx, auth, reporter, baseURL, apiKey, payload, contentType, endpointPath)
+}
+
+func (e *OpenAICompatExecutor) executeMedia(ctx context.Context, auth *cliproxyauth.Auth, reporter *helps.UsageReporter, baseURL string, apiKey string, payload []byte, contentType string, endpointPath string) (resp cliproxyexecutor.Response, err error) {
 	url := strings.TrimSuffix(baseURL, "/") + endpointPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
@@ -285,6 +324,93 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 	reporter.EnsurePublished(ctx)
 	resp = cliproxyexecutor.Response{Payload: body, Headers: httpResp.Header.Clone()}
 	return resp, nil
+}
+
+func (e *OpenAICompatExecutor) executeVideoRetrieve(ctx context.Context, auth *cliproxyauth.Auth, reporter *helps.UsageReporter, baseURL string, apiKey string, videoID string, endpointPath string) (resp cliproxyexecutor.Response, err error) {
+	url := strings.TrimSuffix(baseURL, "/") + endpointPath + "/" + url.PathEscape(videoID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return resp, err
+	}
+	if apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodGet,
+		Headers:   httpReq.Header.Clone(),
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("openai compat executor: close response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+
+	body, errRead := io.ReadAll(httpResp.Body)
+	if errRead != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		err = errRead
+		return resp, err
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
+		err = statusErr{code: httpResp.StatusCode, msg: string(body)}
+		return resp, err
+	}
+
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
+	reporter.EnsurePublished(ctx)
+	resp = cliproxyexecutor.Response{Payload: body, Headers: httpResp.Header.Clone()}
+	return resp, nil
+}
+
+func openAICompatVideoRetrieveID(payload []byte) (string, bool) {
+	if !json.Valid(payload) {
+		return "", false
+	}
+	var data map[string]any
+	if err := json.Unmarshal(payload, &data); err != nil {
+		return "", false
+	}
+	videoID := jsonStringValue(data["request_id"])
+	if videoID == "" {
+		videoID = jsonStringValue(data["video_id"])
+	}
+	if videoID == "" {
+		return "", false
+	}
+	if jsonStringValue(data["prompt"]) != "" {
+		return "", false
+	}
+	return videoID, true
 }
 
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -625,6 +751,13 @@ func openAICompatImageEndpointPath(opts cliproxyexecutor.Options) string {
 	return openAICompatDefaultImageEndpoint
 }
 
+func openAICompatVideoEndpointPath(opts cliproxyexecutor.Options) string {
+	if opts.SourceFormat.String() != openAICompatVideoHandlerType {
+		return ""
+	}
+	return openAICompatVideosPath
+}
+
 func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType string, stream bool) ([]byte, string, error) {
 	model = strings.TrimSpace(model)
 	contentType = strings.TrimSpace(contentType)
@@ -649,6 +782,197 @@ func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType 
 		return nil, "", fmt.Errorf("multipart boundary is missing")
 	}
 	return rewriteOpenAICompatImagesMultipartPayload(payload, model, boundary, stream)
+}
+
+func prepareOpenAICompatVideosPayload(payload []byte, model string, contentType string) ([]byte, string, error) {
+	model = strings.TrimSpace(model)
+	contentType = strings.TrimSpace(contentType)
+	if json.Valid(payload) {
+		values := url.Values{}
+		if model != "" {
+			values.Set("model", model)
+		}
+		var data map[string]any
+		if err := json.Unmarshal(payload, &data); err != nil {
+			return nil, "", fmt.Errorf("unmarshal video payload failed: %w", err)
+		}
+		copyJSONFormField(values, data, "prompt", "prompt")
+		if !copyJSONFormField(values, data, "seconds", "seconds") {
+			copyJSONFormField(values, data, "duration", "seconds")
+		}
+		if !copyJSONFormField(values, data, "size", "size") {
+			if size := openAICompatVideoSizeFromAspectRatio(jsonStringValue(data["aspect_ratio"])); size != "" {
+				values.Set("size", size)
+			}
+		}
+		if !copyJSONFormField(values, data, "resolution_name", "resolution_name") {
+			copyJSONFormField(values, data, "resolution", "resolution_name")
+		}
+		copyJSONFormField(values, data, "preset", "preset")
+		return []byte(values.Encode()), "application/x-www-form-urlencoded", nil
+	}
+
+	mediaType, params, errParse := mime.ParseMediaType(contentType)
+	if errParse != nil {
+		return payload, contentType, nil
+	}
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	if mediaType == "application/x-www-form-urlencoded" {
+		values, errValues := url.ParseQuery(string(payload))
+		if errValues != nil {
+			return nil, "", fmt.Errorf("parse video form payload failed: %w", errValues)
+		}
+		if model != "" {
+			values.Set("model", model)
+		}
+		if values.Get("seconds") == "" && values.Get("duration") != "" {
+			values.Set("seconds", values.Get("duration"))
+			values.Del("duration")
+		}
+		if values.Get("resolution_name") == "" && values.Get("resolution") != "" {
+			values.Set("resolution_name", values.Get("resolution"))
+			values.Del("resolution")
+		}
+		if values.Get("size") == "" {
+			if size := openAICompatVideoSizeFromAspectRatio(values.Get("aspect_ratio")); size != "" {
+				values.Set("size", size)
+			}
+		}
+		values.Del("stream")
+		return []byte(values.Encode()), "application/x-www-form-urlencoded", nil
+	}
+	if !strings.HasPrefix(mediaType, "multipart/") {
+		return payload, contentType, nil
+	}
+	boundary := strings.TrimSpace(params["boundary"])
+	if boundary == "" {
+		return nil, "", fmt.Errorf("multipart boundary is missing")
+	}
+	return rewriteOpenAICompatVideosMultipartPayload(payload, model, boundary)
+}
+
+func copyJSONFormField(values url.Values, data map[string]any, source string, target string) bool {
+	value, ok := data[source]
+	if !ok {
+		return false
+	}
+	text := jsonStringValue(value)
+	if text == "" {
+		return false
+	}
+	values.Set(target, text)
+	return true
+}
+
+func jsonStringValue(value any) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case float64:
+		if v == float64(int64(v)) {
+			return fmt.Sprintf("%d", int64(v))
+		}
+		return strings.TrimSpace(fmt.Sprintf("%v", v))
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
+	case json.Number:
+		return strings.TrimSpace(v.String())
+	default:
+		return ""
+	}
+}
+
+func openAICompatVideoSizeFromAspectRatio(aspectRatio string) string {
+	switch strings.TrimSpace(aspectRatio) {
+	case "16:9":
+		return "1280x720"
+	case "9:16":
+		return "720x1280"
+	case "1:1":
+		return "1024x1024"
+	default:
+		return ""
+	}
+}
+
+func rewriteOpenAICompatVideosMultipartPayload(payload []byte, model string, boundary string) ([]byte, string, error) {
+	reader := multipart.NewReader(bytes.NewReader(payload), boundary)
+	form, errRead := reader.ReadForm(openAICompatMultipartMemory)
+	if errRead != nil {
+		return nil, "", fmt.Errorf("read multipart form failed: %w", errRead)
+	}
+	defer func() {
+		if errRemove := form.RemoveAll(); errRemove != nil {
+			log.Errorf("openai compat executor: remove multipart form files error: %v", errRemove)
+		}
+	}()
+
+	if model != "" {
+		form.Value["model"] = []string{model}
+	}
+	if values := form.Value["duration"]; len(form.Value["seconds"]) == 0 && len(values) > 0 {
+		form.Value["seconds"] = append([]string(nil), values...)
+	}
+	delete(form.Value, "duration")
+	if values := form.Value["resolution"]; len(form.Value["resolution_name"]) == 0 && len(values) > 0 {
+		form.Value["resolution_name"] = append([]string(nil), values...)
+	}
+	delete(form.Value, "resolution")
+	if len(form.Value["size"]) == 0 {
+		if values := form.Value["aspect_ratio"]; len(values) > 0 {
+			if size := openAICompatVideoSizeFromAspectRatio(values[0]); size != "" {
+				form.Value["size"] = []string{size}
+			}
+		}
+	}
+	delete(form.Value, "stream")
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for key, values := range form.Value {
+		for _, value := range values {
+			if errWrite := writer.WriteField(key, value); errWrite != nil {
+				return nil, "", fmt.Errorf("write form field %s failed: %w", key, errWrite)
+			}
+		}
+	}
+	for key, files := range form.File {
+		for _, fileHeader := range files {
+			if fileHeader == nil {
+				continue
+			}
+			header := cloneOpenAICompatMIMEHeader(fileHeader.Header)
+			header.Set("Content-Disposition", multipart.FileContentDisposition(key, fileHeader.Filename))
+			if header.Get("Content-Type") == "" {
+				header.Set("Content-Type", "application/octet-stream")
+			}
+			part, errCreate := writer.CreatePart(header)
+			if errCreate != nil {
+				return nil, "", fmt.Errorf("create file field %s failed: %w", key, errCreate)
+			}
+			src, errOpen := fileHeader.Open()
+			if errOpen != nil {
+				return nil, "", fmt.Errorf("open upload file failed: %w", errOpen)
+			}
+			_, errCopy := io.Copy(part, src)
+			if errClose := src.Close(); errClose != nil {
+				log.Errorf("openai compat executor: close upload file error: %v", errClose)
+				if errCopy == nil {
+					errCopy = errClose
+				}
+			}
+			if errCopy != nil {
+				return nil, "", fmt.Errorf("copy upload file failed: %w", errCopy)
+			}
+		}
+	}
+	if errClose := writer.Close(); errClose != nil {
+		return nil, "", fmt.Errorf("close multipart writer failed: %w", errClose)
+	}
+	return body.Bytes(), writer.FormDataContentType(), nil
 }
 
 func cloneOpenAICompatMIMEHeader(src textproto.MIMEHeader) textproto.MIMEHeader {

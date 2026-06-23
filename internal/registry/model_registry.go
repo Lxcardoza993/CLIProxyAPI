@@ -18,6 +18,9 @@ import (
 // OpenAIImageModelType marks models that are callable through OpenAI-compatible image endpoints.
 const OpenAIImageModelType = "openai-image"
 
+// OpenAIVideoModelType marks models that are callable through OpenAI-compatible video endpoints.
+const OpenAIVideoModelType = "openai-video"
+
 // ModelInfo represents information about an available model
 type ModelInfo struct {
 	// ID is the unique identifier for the model
