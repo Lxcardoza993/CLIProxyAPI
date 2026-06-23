@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
@@ -59,8 +61,50 @@ type rpcHostLogRequest struct {
 	Fields         map[string]any `json:"fields,omitempty"`
 }
 
+type rpcHostModelExecutionRequest struct {
+	pluginapi.HostModelExecutionRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
+type dynamicHostCallbackEntry struct {
+	host     *Host
+	pluginID string
+}
+
+type hostCallbackPluginIDKey struct{}
+
+func withHostCallbackPluginID(ctx context.Context, pluginID string) context.Context {
+	pluginID = strings.TrimSpace(pluginID)
+	if pluginID == "" {
+		if ctx == nil {
+			return context.Background()
+		}
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, hostCallbackPluginIDKey{}, pluginID)
+}
+
+func hostCallbackPluginIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	pluginID, _ := ctx.Value(hostCallbackPluginIDKey{}).(string)
+	return strings.TrimSpace(pluginID)
+}
+
 func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte) ([]byte, error) {
 	switch method {
+	case pluginabi.MethodHostModelExecute:
+		return h.callHostModelExecute(ctx, request)
+	case pluginabi.MethodHostModelExecuteStream:
+		return h.callHostModelExecuteStream(ctx, request)
+	case pluginabi.MethodHostModelStreamRead:
+		return h.callHostModelStreamRead(ctx, request)
+	case pluginabi.MethodHostModelStreamClose:
+		return h.callHostModelStreamClose(request)
 	case pluginabi.MethodHostHTTPDo:
 		return h.callHostHTTPDo(ctx, request)
 	case pluginabi.MethodHostHTTPDoStream:
@@ -75,9 +119,24 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return h.callHostStreamClose(request)
 	case pluginabi.MethodHostLog:
 		return h.callHostLog(ctx, request)
+	case pluginabi.MethodHostAuthList:
+		return h.callHostAuthList(ctx, request)
+	case pluginabi.MethodHostAuthGet:
+		return h.callHostAuthGet(ctx, request)
+	case pluginabi.MethodHostAuthGetRuntime:
+		return h.callHostAuthGetRuntime(ctx, request)
+	case pluginabi.MethodHostAuthSave:
+		return h.callHostAuthSave(ctx, request)
 	default:
 		return nil, fmt.Errorf("unsupported host callback %s", method)
 	}
+}
+
+func (h *Host) callbackCallerPluginID(ctx context.Context, callbackID string) string {
+	if pluginID := hostCallbackPluginIDFromContext(ctx); pluginID != "" {
+		return pluginID
+	}
+	return h.callbackContextPluginID(callbackID)
 }
 
 func (h *Host) callHostHTTPDo(ctx context.Context, request []byte) ([]byte, error) {
@@ -205,6 +264,59 @@ func (h *Host) callHostStreamClose(request []byte) ([]byte, error) {
 	}
 	h.streams.close(req.StreamID, req.Error)
 	return marshalRPCResult(rpcEmptyResponse{})
+}
+
+func (h *Host) callHostModelExecute(ctx context.Context, request []byte) ([]byte, error) {
+	var req rpcHostModelExecutionRequest
+	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+		return nil, fmt.Errorf("decode host model execution request: %w", errUnmarshal)
+	}
+	if req.Stream {
+		return nil, fmt.Errorf("host.model.execute requires stream=false")
+	}
+	executor := h.currentModelExecutor()
+	if executor == nil {
+		return nil, fmt.Errorf("host model executor is unavailable")
+	}
+	skipPluginID := h.callbackCallerPluginID(ctx, req.HostCallbackID)
+	ctx = h.resolveCallbackContext(req.HostCallbackID, ctx)
+	resp, errMsg := executor.ExecuteModel(ctx, modelExecutionRequestFromPlugin(req.HostModelExecutionRequest, skipPluginID))
+	if errMsg != nil {
+		return nil, modelExecutionError(errMsg)
+	}
+	return marshalRPCResult(pluginapi.HostModelExecutionResponse{
+		StatusCode: resp.StatusCode,
+		Headers:    cloneHeader(resp.Headers),
+		Body:       append([]byte(nil), resp.Body...),
+	})
+}
+
+func modelExecutionRequestFromPlugin(req pluginapi.HostModelExecutionRequest, skipPluginID string) handlers.ModelExecutionRequest {
+	return handlers.ModelExecutionRequest{
+		EntryProtocol:           req.EntryProtocol,
+		ExitProtocol:            req.ExitProtocol,
+		Model:                   req.Model,
+		Stream:                  req.Stream,
+		Body:                    append([]byte(nil), req.Body...),
+		Headers:                 cloneHeader(req.Headers),
+		Query:                   cloneValues(req.Query),
+		Alt:                     req.Alt,
+		SkipInterceptorPluginID: skipPluginID,
+		SkipRouterPluginID:      skipPluginID,
+	}
+}
+
+func modelExecutionError(errMsg *interfaces.ErrorMessage) error {
+	if errMsg == nil {
+		return nil
+	}
+	if errMsg.Error != nil {
+		return errMsg.Error
+	}
+	if errMsg.StatusCode > 0 {
+		return fmt.Errorf("model execution failed with status %d", errMsg.StatusCode)
+	}
+	return fmt.Errorf("model execution failed")
 }
 
 func (h *Host) callHostLog(ctx context.Context, request []byte) ([]byte, error) {

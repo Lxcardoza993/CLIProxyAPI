@@ -1,7 +1,6 @@
 package pluginhost
 
 import (
-	"net/http"
 	"sort"
 	"strings"
 
@@ -29,7 +28,7 @@ type RegisteredPluginInfo struct {
 	Menus         []RegisteredPluginMenu
 }
 
-// RegisteredPluginMenu describes a plugin-owned GET Management API menu entry.
+// RegisteredPluginMenu describes a plugin-owned resource menu entry.
 type RegisteredPluginMenu struct {
 	Path        string
 	Menu        string
@@ -52,12 +51,33 @@ func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
 		out = append(out, RegisteredPluginInfo{
 			ID:            record.id,
 			Priority:      record.priority,
-			Metadata:      record.meta,
+			Metadata:      clonePluginMetadata(record.meta),
 			SupportsOAuth: record.plugin.Capabilities.AuthProvider != nil,
 			Menus:         menusByPlugin[record.id],
 		})
 	}
 	return out
+}
+
+// PluginRegistered reports whether a plugin is active in the current runtime snapshot.
+func (h *Host) PluginRegistered(id string) bool {
+	if h == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	snap := h.Snapshot()
+	if snap == nil || len(snap.records) == 0 {
+		return false
+	}
+	for _, record := range snap.records {
+		if record.id == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Host) registeredPluginMenus() map[string][]RegisteredPluginMenu {
@@ -67,10 +87,7 @@ func (h *Host) registeredPluginMenus() map[string][]RegisteredPluginMenu {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, record := range h.managementRoutes {
-		if !strings.EqualFold(strings.TrimSpace(record.route.Method), http.MethodGet) {
-			continue
-		}
+	for _, record := range h.resourceRoutes {
 		menu := strings.TrimSpace(record.route.Menu)
 		if menu == "" {
 			continue
@@ -96,4 +113,24 @@ func sortRecords(records []capabilityRecord) {
 		}
 		return records[i].priority > records[j].priority
 	})
+}
+
+func clonePluginMetadata(meta pluginapi.Metadata) pluginapi.Metadata {
+	if len(meta.ConfigFields) == 0 {
+		return meta
+	}
+	meta.ConfigFields = cloneConfigFields(meta.ConfigFields)
+	return meta
+}
+
+func cloneConfigFields(fields []pluginapi.ConfigField) []pluginapi.ConfigField {
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make([]pluginapi.ConfigField, len(fields))
+	copy(out, fields)
+	for index := range out {
+		out[index].EnumValues = append([]string(nil), fields[index].EnumValues...)
+	}
+	return out
 }
