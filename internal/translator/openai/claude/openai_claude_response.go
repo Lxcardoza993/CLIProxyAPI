@@ -319,7 +319,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				if accumulator.Arguments.Len() > 0 {
 					inputDeltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
 					inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "index", blockIndex)
-					inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", util.FixJSON(accumulator.Arguments.String()))
+					inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", sanitizeToolCallArguments(accumulator.Arguments.String()))
 					results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", inputDeltaJSON, 2))
 				}
 
@@ -390,7 +390,7 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 			if accumulator.Arguments.Len() > 0 {
 				inputDeltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
 				inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "index", blockIndex)
-				inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", util.FixJSON(accumulator.Arguments.String()))
+				inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", sanitizeToolCallArguments(accumulator.Arguments.String()))
 				results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", inputDeltaJSON, 2))
 			}
 
@@ -589,6 +589,40 @@ func emitToolUseStart(param *ConvertOpenAIResponseToAnthropicParams, openAIToolI
 	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSON, 2))
 	accumulator.StartEmitted = true
 	param.SawToolCall = true
+}
+
+// sanitizeToolCallArguments ensures a tool call's accumulated arguments are a
+// valid JSON object before they are streamed to the client. When FixJSON
+// cannot salvage them, it falls back to "{}" so the client reports a
+// recoverable missing-parameter error instead of a fatal "could not parse as
+// JSON" InputValidationError. Malformed arguments are intentionally not
+// repaired: closing truncated quotes/braces could yield a syntactically valid
+// but semantically incomplete payload that a tool such as Edit would execute,
+// writing partial content to disk.
+//
+// Approach inspired by the validate-then-repair pattern in DdogezD/claudium
+// (commit 43bf03f); narrowed to validate-then-fallback because CPA lacks the
+// tool's input schema at this emission point and repairing truncated tool
+// input is unsafe.
+func sanitizeToolCallArguments(rawArgs string) string {
+	// Guard FixJSON (which converts input to []rune) and gjson against
+	// pathologically large arguments from a misbehaving upstream model; such
+	// payloads are not valid tool input anyway.
+	const maxToolArgumentsBytes = 10 * 1024 * 1024
+	if len(rawArgs) > maxToolArgumentsBytes {
+		return "{}"
+	}
+	argsStr := util.FixJSON(rawArgs)
+	if argsStr == "" || !gjson.Valid(argsStr) {
+		return "{}"
+	}
+	// A bare number/array/string is valid JSON but not a valid tool input
+	// object; mirror the non-streaming path (see ConvertOpenAIResponseToClaudeNonStream)
+	// and fall back to "{}" so the client reports a recoverable missing-parameter error.
+	if !gjson.Parse(argsStr).IsObject() {
+		return "{}"
+	}
+	return argsStr
 }
 
 func toolCallAccumulatorIndexes(accumulators map[int]*ToolCallAccumulator) []int {
