@@ -42,11 +42,13 @@ func TestDownloadAuthFile_RejectsPathSeparators(t *testing.T) {
 
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
 
+	// Nested relative names (e.g. ".disabled-codex-free/foo.json") are now
+	// resolved under AuthDir; only escaping/absolute names must be rejected.
 	for _, name := range []string{
 		"../external/secret.json",
 		`..\\external\\secret.json`,
-		"nested/secret.json",
-		`nested\\secret.json`,
+		"/etc/passwd.json",
+		"nested/../../external/secret.json",
 	} {
 		rec := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(rec)

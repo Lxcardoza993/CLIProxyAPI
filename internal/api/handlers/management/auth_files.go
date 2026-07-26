@@ -694,17 +694,59 @@ func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
 	return strings.EqualFold(strings.TrimSpace(auth.Attributes["runtime_only"]), "true")
 }
 
+// isUnsafeAuthFileName rejects empty names, absolute/volume paths, and path traversal.
+// Relative names under AuthDir are allowed, including nested auth files such as
+// ".disabled-codex-free/account.json" that FileTokenStore lists via filepath.WalkDir.
 func isUnsafeAuthFileName(name string) bool {
-	if strings.TrimSpace(name) == "" {
+	name = strings.TrimSpace(name)
+	if name == "" {
 		return true
 	}
-	if strings.ContainsAny(name, "/\\") {
+	if filepath.IsAbs(name) || filepath.VolumeName(name) != "" {
 		return true
 	}
-	if filepath.VolumeName(name) != "" {
+	// Reject Windows-style absolute paths when running on non-Windows hosts.
+	if len(name) >= 2 && ((name[0] >= 'A' && name[0] <= 'Z') || (name[0] >= 'a' && name[0] <= 'z')) && name[1] == ':' {
 		return true
+	}
+	cleaned := filepath.Clean(name)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return true
+	}
+	for _, part := range strings.FieldsFunc(name, func(r rune) bool {
+		return r == '/' || r == '\\'
+	}) {
+		if part == ".." {
+			return true
+		}
 	}
 	return false
+}
+
+// resolveAuthFileNameUnderDir maps a relative auth file name to an absolute path
+// under authDir. Nested relative paths are preserved; absolute and escaping names are rejected.
+func resolveAuthFileNameUnderDir(authDir, name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if isUnsafeAuthFileName(name) {
+		return "", fmt.Errorf("invalid name")
+	}
+	authDir = strings.TrimSpace(authDir)
+	if authDir == "" {
+		return "", fmt.Errorf("auth directory not configured")
+	}
+	authDir = filepath.Clean(authDir)
+	if !filepath.IsAbs(authDir) {
+		if abs, errAbs := filepath.Abs(authDir); errAbs == nil {
+			authDir = abs
+		}
+	}
+	// Normalize separators so mixed / and \ names still stay under authDir.
+	rel := filepath.FromSlash(filepath.ToSlash(filepath.Clean(name)))
+	full := filepath.Clean(filepath.Join(authDir, rel))
+	if full != authDir && !strings.HasPrefix(full, authDir+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid name")
+	}
+	return full, nil
 }
 
 // Download single auth file by name
@@ -718,7 +760,11 @@ func (h *Handler) DownloadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "name must end with .json"})
 		return
 	}
-	full := filepath.Join(h.cfg.AuthDir, name)
+	full, errResolve := resolveAuthFileNameUnderDir(h.cfg.AuthDir, name)
+	if errResolve != nil {
+		c.JSON(400, gin.H{"error": "invalid name"})
+		return
+	}
 	data, err := os.ReadFile(full)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1030,11 +1076,15 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 		return "", http.StatusBadRequest, fmt.Errorf("invalid name")
 	}
 
-	targetPath := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	targetPath, errResolve := resolveAuthFileNameUnderDir(h.cfg.AuthDir, name)
+	if errResolve != nil {
+		return "", http.StatusBadRequest, fmt.Errorf("invalid name")
+	}
+	displayName := filepath.ToSlash(filepath.Clean(name))
 	targetID := ""
 	if targetAuth := h.findAuthForDelete(name); targetAuth != nil {
 		if !isPluginVirtualSourceDelete(name, targetAuth) {
-			return filepath.Base(name), http.StatusConflict, errPluginVirtualAuth
+			return displayName, http.StatusConflict, errPluginVirtualAuth
 		}
 		targetID = strings.TrimSpace(targetAuth.ID)
 		if path := strings.TrimSpace(authAttribute(targetAuth, "path")); path != "" {
@@ -1048,15 +1098,15 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 	}
 	if errRemove := os.Remove(targetPath); errRemove != nil {
 		if os.IsNotExist(errRemove) {
-			return filepath.Base(name), http.StatusNotFound, errAuthFileNotFound
+			return displayName, http.StatusNotFound, errAuthFileNotFound
 		}
-		return filepath.Base(name), http.StatusInternalServerError, fmt.Errorf("failed to remove file: %w", errRemove)
+		return displayName, http.StatusInternalServerError, fmt.Errorf("failed to remove file: %w", errRemove)
 	}
 	if errDeleteRecord := h.deleteTokenRecord(ctx, targetPath); errDeleteRecord != nil {
-		return filepath.Base(name), http.StatusInternalServerError, errDeleteRecord
+		return displayName, http.StatusInternalServerError, errDeleteRecord
 	}
 	h.removeAuthsForPath(ctx, targetPath, targetID)
-	return filepath.Base(name), http.StatusOK, nil
+	return displayName, http.StatusOK, nil
 }
 
 func isPluginVirtualSourceDelete(name string, auth *coreauth.Auth) bool {

@@ -170,3 +170,100 @@ func TestDeleteAuthFile_RemovesRuntimeAuth(t *testing.T) {
 		t.Fatalf("expected runtime auth %q to be removed", record.ID)
 	}
 }
+
+func TestDeleteAuthFile_NestedRelativeName(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	authDir := t.TempDir()
+	nestedDir := filepath.Join(authDir, ".disabled-codex-free")
+	if errMkdir := os.MkdirAll(nestedDir, 0o700); errMkdir != nil {
+		t.Fatalf("failed to create nested auth dir: %v", errMkdir)
+	}
+	fileName := ".disabled-codex-free/codex1@coolkidsa.ggff.net-free.json"
+	filePath := filepath.Join(authDir, filepath.FromSlash(fileName))
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","email":"codex1@coolkidsa.ggff.net"}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write nested auth file: %v", errWrite)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	record := &coreauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "codex",
+		Status:   coreauth.StatusDisabled,
+		Disabled: true,
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		Metadata: map[string]any{
+			"type":  "codex",
+			"email": "codex1@coolkidsa.ggff.net",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = &memoryAuthStore{}
+
+	deleteRec := httptest.NewRecorder()
+	deleteCtx, _ := gin.CreateTestContext(deleteRec)
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape(fileName), nil)
+	deleteCtx.Request = deleteReq
+	h.DeleteAuthFile(deleteCtx)
+
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
+		t.Fatalf("expected nested auth file to be removed, stat err: %v", errStat)
+	}
+	if _, ok := manager.GetByID(record.ID); ok {
+		t.Fatalf("expected nested auth %q to be removed from manager", record.ID)
+	}
+}
+
+func TestDeleteAuthFile_RejectsPathTraversal(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	authDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "secret.json")
+	if errWrite := os.WriteFile(outsideFile, []byte(`{"type":"codex"}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write outside file: %v", errWrite)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = &memoryAuthStore{}
+
+	escapeName := filepath.ToSlash(filepath.Join("..", filepath.Base(outsideDir), "secret.json"))
+	deleteRec := httptest.NewRecorder()
+	deleteCtx, _ := gin.CreateTestContext(deleteRec)
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape(escapeName), nil)
+	deleteCtx.Request = deleteReq
+	h.DeleteAuthFile(deleteCtx)
+
+	if deleteRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusBadRequest, deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, errStat := os.Stat(outsideFile); errStat != nil {
+		t.Fatalf("expected outside file to remain, stat err: %v", errStat)
+	}
+}
+
+func TestIsUnsafeAuthFileNameAllowsNestedRelative(t *testing.T) {
+	if isUnsafeAuthFileName(".disabled-codex-free/codex1@coolkidsa.ggff.net-free.json") {
+		t.Fatal("expected nested relative auth name to be allowed")
+	}
+	if !isUnsafeAuthFileName("../secret.json") {
+		t.Fatal("expected path traversal name to be rejected")
+	}
+	if !isUnsafeAuthFileName("/tmp/secret.json") {
+		t.Fatal("expected absolute path to be rejected")
+	}
+	if !isUnsafeAuthFileName("") {
+		t.Fatal("expected empty name to be rejected")
+	}
+}
