@@ -544,6 +544,12 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
+	// Propagate the CLI flag override into the runtime config so Management API
+	// initiated OAuth flows (e.g. antigravity-auth-url) honor the same port.
+	if oauthCallbackPort > 0 {
+		cfg.OAuthCallbackPort = oauthCallbackPort
+	}
+
 	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)

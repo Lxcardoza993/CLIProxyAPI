@@ -2124,7 +2124,15 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		return
 	}
 
-	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", antigravity.CallbackPort)
+	// callbackPort is the loopback port used for the OAuth redirect URI and the
+	// local callback forwarder. It defaults to the provider constant and can be
+	// overridden via the oauth-callback-port config field / CLI flag.
+	callbackPort := antigravity.CallbackPort
+	if h.cfg != nil && h.cfg.OAuthCallbackPort > 0 {
+		callbackPort = h.cfg.OAuthCallbackPort
+	}
+
+	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", callbackPort)
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
 	RegisterOAuthSession(state, "antigravity")
@@ -2139,7 +2147,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			return
 		}
 		var errStart error
-		if forwarder, errStart = startCallbackForwarder(antigravity.CallbackPort, "antigravity", targetURL); errStart != nil {
+		if forwarder, errStart = startCallbackForwarder(callbackPort, "antigravity", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start antigravity callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return
@@ -2148,7 +2156,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 	go func() {
 		if isWebUI {
-			defer stopCallbackForwarderInstance(antigravity.CallbackPort, forwarder)
+			defer stopCallbackForwarderInstance(callbackPort, forwarder)
 		}
 
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))

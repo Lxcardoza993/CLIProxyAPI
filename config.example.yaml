@@ -418,6 +418,13 @@ nonstream-keepalive-interval: 0
 #     - "claude-3-5-haiku-20241022"
 #   codex:
 #     - "gpt-5-codex-mini"
+
+# Override the loopback OAuth callback port for OAuth flows initiated via the
+# Management API (e.g. the antigravity-auth-url endpoint). Useful when the
+# provider default port is unavailable (reserved or excluded by the OS).
+# When unset (or 0), each provider's default callback port is used
+# (antigravity: 51121, anthropic: 54545, codex: 1455, xai: 56121).
+# oauth-callback-port: 51129
 #   kimi:
 #     - "kimi-k2-thinking"
 #   xai:

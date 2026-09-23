@@ -100,6 +100,11 @@ type Config struct {
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
 
+	// OAuthCallbackPort overrides the loopback OAuth callback port for OAuth flows
+	// initiated via the Management API (e.g. the antigravity-auth-url endpoint).
+	// When 0 or negative, each provider's default callback port is used.
+	OAuthCallbackPort int `yaml:"oauth-callback-port" json:"oauth-callback-port"`
+
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
