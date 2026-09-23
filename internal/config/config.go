@@ -310,7 +310,7 @@ type PprofConfig struct {
 // (oauth-callback-port: {antigravity: 51129, anthropic: 54546, ...}) or the
 // legacy global scalar form (oauth-callback-port: 51129); the scalar is kept
 // in Global and acts as a lower-priority fallback for every channel.
-// Invalid or zero/negative values are rejected at load time.
+// Zero or negative values are treated as unset for backward compatibility.
 type OAuthCallbackPortConfig struct {
 	// Global is the legacy scalar form applying to all channels.
 	Global int `yaml:"-" json:"global,omitempty"`
