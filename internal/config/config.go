@@ -102,6 +102,8 @@ type Config struct {
 
 	// OAuthCallbackPort overrides the loopback OAuth callback port for OAuth flows
 	// initiated via the Management API (e.g. the antigravity-auth-url endpoint).
+	// Currently only the Antigravity management flow consumes this override;
+	// other providers keep their fixed management callback ports.
 	// When 0 or negative, each provider's default callback port is used.
 	OAuthCallbackPort int `yaml:"oauth-callback-port" json:"oauth-callback-port"`
 
