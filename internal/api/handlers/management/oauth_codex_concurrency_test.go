@@ -20,7 +20,15 @@ func (f *fakeCodexOAuthService) GenerateAuthURL(state string, pkceCodes *codex.P
 	return "https://auth.example.test/oauth?state=" + state, nil
 }
 
+func (f *fakeCodexOAuthService) GenerateAuthURLWithRedirect(state string, pkceCodes *codex.PKCECodes, redirectURI string) (string, error) {
+	return "https://auth.example.test/oauth?state=" + state, nil
+}
+
 func (f *fakeCodexOAuthService) ExchangeCodeForTokens(ctx context.Context, code string, pkceCodes *codex.PKCECodes) (*codex.CodexAuthBundle, error) {
+	return f.ExchangeCodeForTokensWithRedirect(ctx, code, "", pkceCodes)
+}
+
+func (f *fakeCodexOAuthService) ExchangeCodeForTokensWithRedirect(ctx context.Context, code, redirectURI string, pkceCodes *codex.PKCECodes) (*codex.CodexAuthBundle, error) {
 	now := time.Now()
 	return &codex.CodexAuthBundle{
 		TokenData: codex.CodexTokenData{

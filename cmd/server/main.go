@@ -94,7 +94,7 @@ func main() {
 	flag.BoolVar(&codexDeviceLogin, "codex-device-login", false, "Login to Codex using device code flow")
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
 	flag.BoolVar(&noBrowser, "no-browser", false, "Don't open browser automatically for OAuth")
-	flag.IntVar(&oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port (defaults to provider-specific port)")
+	flag.IntVar(&oauthCallbackPort, "oauth-callback-port", 0, "Override OAuth callback port for all providers (defaults to provider-specific port; overrides per-channel config)")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
@@ -545,9 +545,15 @@ func main() {
 	}
 
 	// Propagate the CLI flag override into the runtime config so Management API
-	// initiated OAuth flows (e.g. antigravity-auth-url) honor the same port.
+	// initiated OAuth flows honor the same port. The flag overrides every
+	// channel (flag > per-channel config > legacy global scalar > default).
 	if oauthCallbackPort > 0 {
-		cfg.OAuthCallbackPort = oauthCallbackPort
+		cfg.OAuthCallbackPort = config.OAuthCallbackPortConfig{
+			Antigravity: oauthCallbackPort,
+			Anthropic:   oauthCallbackPort,
+			Codex:       oauthCallbackPort,
+			XAI:         oauthCallbackPort,
+		}
 	}
 
 	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin

@@ -64,14 +64,23 @@ func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
 // It constructs the URL with the necessary parameters, including the client ID,
 // response type, redirect URI, scopes, and PKCE challenge.
 func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string, error) {
+	return o.GenerateAuthURLWithRedirect(state, pkceCodes, RedirectURI)
+}
+
+// GenerateAuthURLWithRedirect creates the OAuth authorization URL with PKCE
+// using a caller-provided redirect URI (e.g. a port override from config).
+func (o *CodexAuth) GenerateAuthURLWithRedirect(state string, pkceCodes *PKCECodes, redirectURI string) (string, error) {
 	if pkceCodes == nil {
 		return "", fmt.Errorf("PKCE codes are required")
+	}
+	if strings.TrimSpace(redirectURI) == "" {
+		return "", fmt.Errorf("redirect URI is required")
 	}
 
 	params := url.Values{
 		"client_id":                  {ClientID},
 		"response_type":              {"code"},
-		"redirect_uri":               {RedirectURI},
+		"redirect_uri":               {strings.TrimSpace(redirectURI)},
 		"scope":                      {"openid email profile offline_access"},
 		"state":                      {state},
 		"code_challenge":             {pkceCodes.CodeChallenge},
