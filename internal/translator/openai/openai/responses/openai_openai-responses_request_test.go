@@ -327,3 +327,32 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesInputImag
 		t.Fatalf("messages.0.content.0.image_url.detail = %q, want high; output=%s", got, out)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DemotesSystemMessagesForDeepseek(t *testing.T) {
+	raw := []byte(`{
+		"instructions": "You are a helpful agent.",
+		"input": [
+			{"role":"system","content":[{"type":"input_text","text":"be concise"}]},
+			{"role":"user","content":[{"type":"input_text","text":"hi"}]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-v4-pro-0813", raw, true)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	msgs := gjson.GetBytes(out, "messages").Array()
+	if len(msgs) != 3 {
+		t.Fatalf("messages count = %d, want 3", len(msgs))
+	}
+	if got := msgs[0].Get("role").String(); got != "system" {
+		t.Fatalf("messages.0.role = %q, want system (from instructions)", got)
+	}
+	if got := msgs[1].Get("role").String(); got != "user" {
+		t.Fatalf("messages.1.role = %q, want user (input system demoted for deepseek)", got)
+	}
+
+	outOther := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("grok-4.7", raw, true)
+	if got := gjson.GetBytes(outOther, "messages.1.role").String(); got != "system" {
+		t.Fatalf("grok messages.1.role = %q, want system (unchanged for non-deepseek)", got)
+	}
+}

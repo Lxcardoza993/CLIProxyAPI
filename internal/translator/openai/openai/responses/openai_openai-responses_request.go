@@ -149,6 +149,14 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if role == "developer" {
 					role = "user"
 				}
+				// Bailian-hosted DeepSeek kernels reject requests with more than
+				// one system message or a system message that is not the first
+				// one. Codex spreads instructions across many system messages, so
+				// demote the extras to user for these models; the `instructions`
+				// field above already produced the single leading system message.
+				if strings.Contains(modelName, "deepseek") && role == "system" {
+					role = "user"
+				}
 				if role != "assistant" {
 					appendPendingReasoningMessage()
 				}
