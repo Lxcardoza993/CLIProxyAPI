@@ -418,6 +418,21 @@ nonstream-keepalive-interval: 0
 #     - "claude-3-5-haiku-20241022"
 #   codex:
 #     - "gpt-5-codex-mini"
+
+# Override the loopback OAuth callback ports for OAuth flows initiated via the
+# Management API (e.g. the *-auth-url endpoints). Useful when a provider
+# default port is unavailable (reserved or excluded by the OS).
+# Accepts either a per-channel map:
+# oauth-callback-port:
+#   antigravity: 51129
+#   anthropic: 54546   # default 54545 (sometimes grabbed by Docker Desktop)
+#   codex: 1456        # default 1455
+#   xai: 56122         # default 56121
+# or the legacy global scalar applying to all channels:
+# oauth-callback-port: 51129
+# The CLI flag --oauth-callback-port overrides both forms for all channels.
+# When unset, each provider's default callback port is used
+# (antigravity: 51121, anthropic: 54545, codex: 1455, xai: 56121).
 #   kimi:
 #     - "kimi-k2-thinking"
 #   xai:

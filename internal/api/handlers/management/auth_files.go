@@ -55,7 +55,9 @@ type callbackForwarder struct {
 
 type codexOAuthService interface {
 	GenerateAuthURL(state string, pkceCodes *codex.PKCECodes) (string, error)
+	GenerateAuthURLWithRedirect(state string, pkceCodes *codex.PKCECodes, redirectURI string) (string, error)
 	ExchangeCodeForTokens(ctx context.Context, code string, pkceCodes *codex.PKCECodes) (*codex.CodexAuthBundle, error)
+	ExchangeCodeForTokensWithRedirect(ctx context.Context, code, redirectURI string, pkceCodes *codex.PKCECodes) (*codex.CodexAuthBundle, error)
 	CreateTokenStorage(bundle *codex.CodexAuthBundle) *codex.CodexTokenStorage
 }
 
@@ -1845,8 +1847,17 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	// Initialize Claude auth service
 	anthropicAuth := claude.NewClaudeAuth(h.cfg)
 
+	// callbackPort is the loopback port used for the OAuth redirect URI and the
+	// local callback forwarder. It defaults to the provider constant and can be
+	// overridden via the oauth-callback-port config field / CLI flag.
+	callbackPort := anthropicCallbackPort
+	if h.cfg != nil {
+		callbackPort = h.cfg.OAuthCallbackPort.Resolve("anthropic", callbackPort)
+	}
+	redirectURI := fmt.Sprintf("http://localhost:%d/callback", callbackPort)
+
 	// Generate authorization URL (then override redirect_uri to reuse server port)
-	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
+	authURL, state, err := anthropicAuth.GenerateAuthURLWithRedirect(state, pkceCodes, redirectURI)
 	if err != nil {
 		log.Errorf("Failed to generate authorization URL: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
@@ -1865,7 +1876,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			return
 		}
 		var errStart error
-		if forwarder, errStart = startCallbackForwarder(anthropicCallbackPort, "anthropic", targetURL); errStart != nil {
+		if forwarder, errStart = startCallbackForwarder(callbackPort, "anthropic", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start anthropic callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return
@@ -1874,7 +1885,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 	go func() {
 		if isWebUI {
-			defer stopCallbackForwarderInstance(anthropicCallbackPort, forwarder)
+			defer stopCallbackForwarderInstance(callbackPort, forwarder)
 		}
 
 		// Helper: wait for callback file
@@ -1929,7 +1940,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		code := strings.Split(rawCode, "#")[0]
 
 		// Exchange code for tokens using internal auth service
-		bundle, errExchange := anthropicAuth.ExchangeCodeForTokens(ctx, code, state, pkceCodes)
+		bundle, errExchange := anthropicAuth.ExchangeCodeForTokensWithRedirect(ctx, code, state, pkceCodes, redirectURI)
 		if errExchange != nil {
 			authErr := claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, errExchange)
 			log.Errorf("Failed to exchange authorization code for tokens: %v", authErr)
@@ -1989,8 +2000,17 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	// Initialize Codex auth service
 	openaiAuth := newCodexOAuthService(h.cfg)
 
+	// callbackPort is the loopback port used for the OAuth redirect URI and the
+	// local callback forwarder. It defaults to the provider constant and can be
+	// overridden via the oauth-callback-port config field / CLI flag.
+	callbackPort := codexCallbackPort
+	if h.cfg != nil {
+		callbackPort = h.cfg.OAuthCallbackPort.Resolve("codex", callbackPort)
+	}
+	redirectURI := fmt.Sprintf("http://localhost:%d/auth/callback", callbackPort)
+
 	// Generate authorization URL
-	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
+	authURL, err := openaiAuth.GenerateAuthURLWithRedirect(state, pkceCodes, redirectURI)
 	if err != nil {
 		log.Errorf("Failed to generate authorization URL: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
@@ -2009,7 +2029,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			return
 		}
 		var errStart error
-		if forwarder, errStart = startCallbackForwarder(codexCallbackPort, "codex", targetURL); errStart != nil {
+		if forwarder, errStart = startCallbackForwarder(callbackPort, "codex", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start codex callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return
@@ -2018,7 +2038,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 	go func() {
 		if isWebUI {
-			defer stopCallbackForwarderInstance(codexCallbackPort, forwarder)
+			defer stopCallbackForwarderInstance(callbackPort, forwarder)
 		}
 
 		// Wait for callback file
@@ -2059,7 +2079,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 		log.Debug("Authorization code received, exchanging for tokens...")
 		// Exchange code for tokens using internal auth service
-		bundle, errExchange := openaiAuth.ExchangeCodeForTokens(ctx, code, pkceCodes)
+		bundle, errExchange := openaiAuth.ExchangeCodeForTokensWithRedirect(ctx, code, redirectURI, pkceCodes)
 		if errExchange != nil {
 			authErr := codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, errExchange)
 			SetOAuthSessionError(state, oauthSessionErrorWithCause("Failed to exchange authorization code for tokens", errExchange))
@@ -2124,7 +2144,15 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		return
 	}
 
-	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", antigravity.CallbackPort)
+	// callbackPort is the loopback port used for the OAuth redirect URI and the
+	// local callback forwarder. It defaults to the provider constant and can be
+	// overridden via the oauth-callback-port config field / CLI flag.
+	callbackPort := antigravity.CallbackPort
+	if h.cfg != nil {
+		callbackPort = h.cfg.OAuthCallbackPort.Resolve("antigravity", callbackPort)
+	}
+
+	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", callbackPort)
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
 	RegisterOAuthSession(state, "antigravity")
@@ -2139,7 +2167,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			return
 		}
 		var errStart error
-		if forwarder, errStart = startCallbackForwarder(antigravity.CallbackPort, "antigravity", targetURL); errStart != nil {
+		if forwarder, errStart = startCallbackForwarder(callbackPort, "antigravity", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start antigravity callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return
@@ -2148,7 +2176,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 	go func() {
 		if isWebUI {
-			defer stopCallbackForwarderInstance(antigravity.CallbackPort, forwarder)
+			defer stopCallbackForwarderInstance(callbackPort, forwarder)
 		}
 
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
@@ -2308,7 +2336,14 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 		return
 	}
 
-	redirectURI := fmt.Sprintf("http://%s:%d%s", xaiauth.RedirectHost, xaiauth.CallbackPort, xaiauth.RedirectPath)
+	// callbackPort is the loopback port used for the OAuth redirect URI and the
+	// local callback forwarder. It defaults to the provider constant and can be
+	// overridden via the oauth-callback-port config field / CLI flag.
+	callbackPort := xaiauth.CallbackPort
+	if h.cfg != nil {
+		callbackPort = h.cfg.OAuthCallbackPort.Resolve("xai", callbackPort)
+	}
+	redirectURI := fmt.Sprintf("http://%s:%d%s", xaiauth.RedirectHost, callbackPort, xaiauth.RedirectPath)
 	authURL, errAuthURL := xaiauth.BuildAuthorizeURL(xaiauth.AuthorizeURLParams{
 		AuthorizationEndpoint: discovery.AuthorizationEndpoint,
 		RedirectURI:           redirectURI,
@@ -2334,7 +2369,7 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 			return
 		}
 		var errStart error
-		if forwarder, errStart = startCallbackForwarder(xaiauth.CallbackPort, "xai", targetURL); errStart != nil {
+		if forwarder, errStart = startCallbackForwarder(callbackPort, "xai", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start xai callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return
@@ -2343,7 +2378,7 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 
 	go func() {
 		if isWebUI {
-			defer stopCallbackForwarderInstance(xaiauth.CallbackPort, forwarder)
+			defer stopCallbackForwarderInstance(callbackPort, forwarder)
 		}
 
 		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-xai-%s.oauth", state))

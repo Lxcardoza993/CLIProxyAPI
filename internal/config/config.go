@@ -100,6 +100,14 @@ type Config struct {
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
 
+	// OAuthCallbackPort overrides the loopback OAuth callback ports for OAuth
+	// flows initiated via the Management API (e.g. the *-auth-url endpoints).
+	// It accepts either a per-channel map or a legacy global scalar that
+	// applies to all channels. Resolution order for each channel:
+	// CLI flag > per-channel value > global scalar > provider default.
+	// When unset, each provider's default callback port is used.
+	OAuthCallbackPort OAuthCallbackPortConfig `yaml:"oauth-callback-port" json:"oauth-callback-port"`
+
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
@@ -295,6 +303,109 @@ type PprofConfig struct {
 	Enable bool `yaml:"enable" json:"enable"`
 	// Addr is the host:port address for the pprof HTTP server.
 	Addr string `yaml:"addr" json:"addr"`
+}
+
+// OAuthCallbackPortConfig overrides the loopback OAuth callback ports used by
+// Management API OAuth flows. It unmarshals from either a per-channel map
+// (oauth-callback-port: {antigravity: 51129, anthropic: 54546, ...}) or the
+// legacy global scalar form (oauth-callback-port: 51129); the scalar is kept
+// in Global and acts as a lower-priority fallback for every channel.
+// Zero or negative values are treated as unset for backward compatibility.
+type OAuthCallbackPortConfig struct {
+	// Global is the legacy scalar form applying to all channels.
+	Global int `yaml:"-" json:"global,omitempty"`
+	// Antigravity overrides the antigravity (51121) callback port.
+	Antigravity int `yaml:"antigravity,omitempty" json:"antigravity,omitempty"`
+	// Anthropic overrides the anthropic/claude (54545) callback port.
+	Anthropic int `yaml:"anthropic,omitempty" json:"anthropic,omitempty"`
+	// Codex overrides the codex (1455) callback port.
+	Codex int `yaml:"codex,omitempty" json:"codex,omitempty"`
+	// XAI overrides the xai (56121) callback port.
+	XAI int `yaml:"xai,omitempty" json:"xai,omitempty"`
+}
+
+// UnmarshalYAML accepts both the per-channel mapping and the legacy scalar
+// form. Zero or negative values are treated as unset for backward
+// compatibility with the previous int-typed field.
+func (o *OAuthCallbackPortConfig) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		var global int
+		if err := value.Decode(&global); err != nil {
+			return fmt.Errorf("oauth-callback-port: expected an integer or a per-channel map: %w", err)
+		}
+		o.Global = global
+		return nil
+	case yaml.MappingNode:
+		type rawChannels struct {
+			Antigravity int `yaml:"antigravity,omitempty"`
+			Anthropic   int `yaml:"anthropic,omitempty"`
+			Codex       int `yaml:"codex,omitempty"`
+			XAI         int `yaml:"xai,omitempty"`
+		}
+		var channels rawChannels
+		if err := value.Decode(&channels); err != nil {
+			return fmt.Errorf("oauth-callback-port: expected a per-channel map (antigravity/anthropic/codex/xai): %w", err)
+		}
+		o.Antigravity = channels.Antigravity
+		o.Anthropic = channels.Anthropic
+		o.Codex = channels.Codex
+		o.XAI = channels.XAI
+		return nil
+	default:
+		return fmt.Errorf("oauth-callback-port: expected an integer or a per-channel map, got %v", value.Tag)
+	}
+}
+
+// MarshalYAML preserves the source form: the legacy scalar when only Global is
+// set (round-trips old configs unchanged) and the per-channel map otherwise.
+// An all-zero value marshals as null so whole-struct omitempty keeps the field
+// out of re-serialized configs.
+func (o OAuthCallbackPortConfig) MarshalYAML() (any, error) {
+	if o.Antigravity == 0 && o.Anthropic == 0 && o.Codex == 0 && o.XAI == 0 {
+		if o.Global == 0 {
+			return nil, nil
+		}
+		return o.Global, nil
+	}
+	type rawChannels struct {
+		Antigravity int `yaml:"antigravity,omitempty"`
+		Anthropic   int `yaml:"anthropic,omitempty"`
+		Codex       int `yaml:"codex,omitempty"`
+		XAI         int `yaml:"xai,omitempty"`
+	}
+	return rawChannels{Antigravity: o.Antigravity, Anthropic: o.Anthropic, Codex: o.Codex, XAI: o.XAI}, nil
+}
+
+// Channel returns the configured callback port override for the named OAuth
+// channel ("antigravity", "anthropic", "codex", "xai"). Zero means no override.
+func (o OAuthCallbackPortConfig) Channel(name string) int {
+	switch name {
+	case "antigravity":
+		return o.Antigravity
+	case "anthropic":
+		return o.Anthropic
+	case "codex":
+		return o.Codex
+	case "xai":
+		return o.XAI
+	default:
+		return 0
+	}
+}
+
+// Resolve returns the effective port for the named channel given the
+// provider-default fallback. Resolution order: per-channel value >
+// legacy global scalar > provider default. The CLI flag is applied earlier
+// (main.go stamps it into every channel field), so it wins over all three.
+func (o OAuthCallbackPortConfig) Resolve(name string, defaultPort int) int {
+	if override := o.Channel(name); override > 0 {
+		return override
+	}
+	if o.Global > 0 {
+		return o.Global
+	}
+	return defaultPort
 }
 
 // RemoteManagement holds management API configuration under 'remote-management'.

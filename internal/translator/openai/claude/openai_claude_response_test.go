@@ -364,3 +364,92 @@ func TestStreamingTool_StopReasonMixedSuppressedAndValid(t *testing.T) {
 		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
 	}
 }
+
+func TestSanitizeToolCallArguments(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"valid object", `{"file_path":"/tmp/a"}`, `{"file_path":"/tmp/a"}`},
+		{"empty string", "", "{}"},
+		{"illegal literal token v3910", `{"file_path":"/tmp/a","offset":v3910}`, "{}"},
+		{"truncated string value", `{"file_path":"/tmp/a","new_string":"partial`, "{}"},
+		{"unescaped inner quote", `{"content":"a"b"}`, "{}"},
+		{"bare number", `123`, "{}"},
+		{"json array", `[1,2,3]`, "{}"},
+		{"bare string", `"hello"`, "{}"},
+		{"oversize arguments", strings.Repeat("a", 10*1024*1024+1), "{}"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sanitizeToolCallArguments(c.in); got != c.want {
+				t.Errorf("sanitizeToolCallArguments(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// inputJSONDeltas returns the partial_json payloads of every input_json_delta
+// event in the stream.
+func inputJSONDeltas(events []sseEvent) []string {
+	var out []string
+	for _, e := range events {
+		if e.Type != "content_block_delta" {
+			continue
+		}
+		if gjson.Get(e.Payload, "delta.type").String() != "input_json_delta" {
+			continue
+		}
+		out = append(out, gjson.Get(e.Payload, "delta.partial_json").String())
+	}
+	return out
+}
+
+// TestStreamingTool_MalformedArgsFallbackToEmpty reproduces the
+// InputValidationError "could not be parsed as JSON" failures observed against
+// kimi-k2.7-code (CC session logs 2026-07-03..07-05): the model emits a
+// tool_call whose accumulated arguments are not valid JSON (illegal literal
+// token, truncated string value, or unescaped inner quote). The streaming
+// translator must NOT ship the raw malformed JSON to the client; it must emit
+// "{}" so the client downgrades to a recoverable missing-parameter error and
+// the model can retry. Shipping the raw bytes would crash the client turn with
+// a fatal InputValidationError; repairing them (e.g. closing quotes/braces)
+// would risk a syntactically valid but semantically incomplete payload that a
+// tool such as Edit could execute, writing partial content to disk.
+func TestStreamingTool_MalformedArgsFallbackToEmpty(t *testing.T) {
+	startChunk := `{"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"do_it","arguments":""}}]}}]}`
+	stopChunk := `{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`
+
+	cases := []struct {
+		name     string
+		argChunk string
+	}{
+		{
+			name:     "illegal_literal_v3910",
+			argChunk: `{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"file_path\":\"/tmp/a\",\"offset\":v3910}"}}]},"finish_reason":null}]}`,
+		},
+		{
+			name:     "truncated_string_value",
+			argChunk: `{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"file_path\":\"/tmp/a\",\"new_string\":\"partial"}}]},"finish_reason":null}]}`,
+		},
+		{
+			name:     "unescaped_inner_quote",
+			argChunk: `{"id":"c1","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"content\":\"a\"b\"}"}}]},"finish_reason":null}]}`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			events := runStream(t, streamReq, startChunk, c.argChunk, stopChunk)
+			deltas := inputJSONDeltas(events)
+			if len(deltas) == 0 {
+				t.Fatalf("expected at least one input_json_delta event, got none; events=%v", events)
+			}
+			for i, d := range deltas {
+				if d != "{}" {
+					t.Fatalf("delta %d partial_json = %q, want %q (malformed args must not be shipped raw)", i, d, "{}")
+				}
+			}
+		})
+	}
+}
